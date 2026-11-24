@@ -1,6 +1,4 @@
-"""业务路由汇总：所有模块共用一套资源路由，由领域服务完成分派。"""
-from __future__ import annotations
+"""路由汇总：批次归属专用接口先注册，随后是通用资源与业务链路路由。"""
+from app.routers import ingest_ownership, resource, chains
 
-from app.routers import resource, chains
-
-ROUTERS = [resource, chains]
+ROUTERS = [ingest_ownership, resource, chains]

@@ -6,7 +6,7 @@ import io
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.schemas import ActionPayload, ActionResult, EntryPayload, PageResult
 from app.services import service_for
@@ -36,6 +36,10 @@ def list_entries(
         for key, value in request.query_params.items()
         if key in service.LIST_FIELDS and value.strip()
     }
+    for alias, chinese_field in (("target_table", "目标湖表"), ("table", "目标湖表")):
+        value = request.query_params.get(alias)
+        if value and chinese_field in service.LIST_FIELDS:
+            filters[chinese_field] = value.strip()
     items, total = service.list_entries(
         filters=filters, keyword=keyword, status=status, page=page, size=size)
     return PageResult(items=items, total=total, page=page, size=size)
@@ -54,6 +58,10 @@ def export_entries(
         for key, value in request.query_params.items()
         if key in service.LIST_FIELDS and value.strip()
     }
+    for alias, chinese_field in (("target_table", "目标湖表"), ("table", "目标湖表")):
+        value = request.query_params.get(alias)
+        if value and chinese_field in service.LIST_FIELDS:
+            filters[chinese_field] = value.strip()
     items, _ = service.list_entries(
         filters=filters, keyword=keyword, status=status, page=1, size=1_000_000)
     output = io.StringIO()
@@ -91,8 +99,45 @@ def create_entry(module: str, payload: EntryPayload) -> ActionResult:
     return ActionResult(ok=True, message=f"{service.ENTITY}已登记", entry=entry)
 
 
+@router.put("/{module}/{entry_id}")
+@router.patch("/{module}/{entry_id}")
+async def update_entry(module: str, entry_id: int, request: Request) -> JSONResponse:
+    service = require_service(module)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if isinstance(body, dict):
+        values = body.get("values") if isinstance(body.get("values"), dict) else body
+    else:
+        values = {"value": body}
+    entry, message = service.update_entry(entry_id, dict(values or {}))
+    ok = entry is not None
+    body_out: dict[str, Any] = {"ok": ok, "message": message, "entry": entry}
+    if isinstance(entry, dict):
+        for key, value in entry.items():
+            body_out.setdefault(key, value)
+    return JSONResponse(status_code=200, content=body_out)
+
+
 @router.post("/{module}/{entry_id}/actions", response_model=ActionResult)
 def run_action(module: str, entry_id: int, payload: ActionPayload) -> ActionResult:
     service = require_service(module)
-    entry, message = service.run_action(entry_id, payload.action.strip())
-    return ActionResult(ok=entry is not None, message=message, entry=entry)
+    options: dict[str, Any] = {}
+    # 兼容 {"action": "...", "values": {...}} 与把 batch_size/table 直接放顶层。
+    options.update(payload.values if isinstance(getattr(payload, "values", None), dict) else {})
+    dumped = payload.model_dump(exclude={"action", "values"})
+    for key, value in dumped.items():
+        if value is not None:
+            options.setdefault(key, value)
+    entry, message = service.run_action(entry_id, payload.action.strip(), options)
+    ok = entry is not None
+    if isinstance(entry, dict) and "ok" in entry:
+        ok = bool(entry.get("ok"))
+    body: dict[str, Any] = {"ok": ok, "message": message, "entry": entry}
+    # 让领取/改绑/提交等富结果既能从 entry 取，也能在响应顶层直接取。
+    if isinstance(entry, dict):
+        for key, value in entry.items():
+            if key not in body:
+                body[key] = value
+    return JSONResponse(status_code=200, content=body)

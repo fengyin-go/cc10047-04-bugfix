@@ -14,6 +14,43 @@ class Store:
         self._tables: dict[str, list[dict[str, Any]]] = {
             name: [dict(row) for row in rows] for name, rows in SEED_ROWS.items()
         }
+        self._align_stream_ownership_seed()
+
+    def _align_stream_ownership_seed(self) -> None:
+        """让内置复现样例具备一致的来源/目标归属。
+
+        源 1、管道 2、提交条目 3 刻意保留为“管道 -> A，提交条目 -> B”的
+        跨表冲突样例；ID 1/1/1 则是可成功走完链路的一致样例。
+        """
+        source_1 = self.find("stream_source", 1)
+        if source_1 is not None:
+            source_1.setdefault("source_id", 1)
+            source_1.setdefault("start_offset", 0)
+
+        pipeline_1 = self.find("stream_ingest", 1)
+        commit_1 = self.find("delta_commit", 1)
+        coherent_table = "湖表定义样例1"
+        if pipeline_1 is not None:
+            pipeline_1.setdefault("source_id", 1)
+            pipeline_1["目标湖表"] = coherent_table
+            pipeline_1["target_table"] = coherent_table
+            pipeline_1.setdefault("ownership_generation", 1)
+        if commit_1 is not None:
+            commit_1["目标湖表"] = coherent_table
+            commit_1["target_table"] = coherent_table
+
+        pipeline_2 = self.find("stream_ingest", 2)
+        if pipeline_2 is not None:
+            pipeline_2.setdefault("source_id", 1)
+            pipeline_2["来源流"] = source_1.get("来源标识") if source_1 else pipeline_2.get("来源流")
+            pipeline_2["目标湖表"] = "A"
+            pipeline_2["target_table"] = "A"
+            pipeline_2.setdefault("ownership_generation", 1)
+
+        commit_3 = self.find("delta_commit", 3)
+        if commit_3 is not None:
+            commit_3["目标湖表"] = "B"
+            commit_3["target_table"] = "B"
 
     def module_names(self) -> list[str]:
         return sorted(self._tables)
@@ -29,7 +66,8 @@ class Store:
 
     def overview(self) -> dict[str, object]:
         modules: list[dict[str, object]] = []
-        for name in self.module_names():
+        # 批次/版本归属等内部状态表不计入业务模块概览。
+        for name in SEED_ROWS.keys():
             rows = self.rows(name)
             modules.append({
                 "name": name,
@@ -44,6 +82,20 @@ class Store:
             {"label": "异常量", "value": sum(int(item["abnormal"]) for item in modules)},
         ]
         return {"cards": cards, "modules": modules}
+
+    def reset(self) -> None:
+        """恢复示例数据；主要供测试隔离使用。"""
+        self._tables.clear()
+        self._tables.update({
+            name: [dict(row) for row in rows] for name, rows in SEED_ROWS.items()
+        })
+        self._align_stream_ownership_seed()
+        # 协调器在 store 中维护别名列表，reset 后需要重新绑定。
+        try:
+            from app.ingest_coordinator import coordinator
+            coordinator._ensure_store()
+        except Exception:
+            pass
 
 
 store = Store()

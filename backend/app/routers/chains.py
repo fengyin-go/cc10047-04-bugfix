@@ -13,8 +13,18 @@ router = APIRouter(prefix="/api/chains", tags=["业务链路"])
 # ------------------------------------------------------------------
 
 @router.post("/stream-ingest")
-def chain_stream_ingest(source_id: int, ingest_id: int, commit_id: int) -> dict:
+def chain_stream_ingest(
+    source_id: int,
+    ingest_id: int,
+    commit_id: int,
+    batch_size: int = 1000,
+    rows: int | None = None,
+    claimed_rows: int | None = None,
+    owner: str | None = None,
+    writer: str | None = None,
+) -> dict:
     """实时流入链路：探测源Schema → 批次摄入 → 提交版本 → 增量摄入。"""
+    effective_batch_size = claimed_rows or rows or batch_size
     steps = []
 
     # Step 1: 探测源Schema
@@ -30,26 +40,58 @@ def chain_stream_ingest(source_id: int, ingest_id: int, commit_id: int) -> dict:
     svc_ingest = service_for("stream_ingest")
     if not svc_ingest:
         raise HTTPException(404, "stream_ingest 服务未注册")
-    r2 = svc_ingest.domain_ingest_batch(ingest_id, batch_size=1000)
+    r2 = svc_ingest.domain_ingest_batch(
+        ingest_id,
+        batch_size=effective_batch_size,
+        source_id=source_id,
+        owner=owner or writer,
+        principal=writer or owner,
+    )
     steps.append({"step": "ingest_batch", "ok": r2["ok"], "details": r2})
     if not r2["ok"]:
         return {"chain": "stream-ingest", "ok": False, "steps": steps, "error": r2.get("message")}
 
-    # Step 3: 提交版本
+    # Step 3: 提交版本。必须把领取批次的来源/偏移/目标表交接给提交条目，
+    # 由 delta_commit 按版本归属记录校验实际摄入对象，不能再独立确认成功。
     svc_commit = service_for("delta_commit")
     if not svc_commit:
         raise HTTPException(404, "delta_commit 服务未注册")
-    r3 = svc_commit.domain_commit(commit_id)
+    handoff = r2.get("handoff") or {
+        "batch_id": r2.get("batch_id"),
+        "pipeline_id": ingest_id,
+        "source_id": source_id,
+        "target_table": r2.get("target_table"),
+    }
+    r3 = svc_commit.domain_commit(
+        commit_id,
+        batch=handoff,
+        source_id=source_id,
+        expected_table=r2.get("target_table"),
+        owner=owner or writer,
+        principal=writer or owner or "stream-ingest-chain",
+    )
     steps.append({"step": "commit_version", "ok": r3["ok"], "details": r3})
     if not r3["ok"]:
         return {"chain": "stream-ingest", "ok": False, "steps": steps, "error": r3.get("message")}
 
-    # Step 4: 增量摄入
-    r4 = svc_commit.domain_ingest_delta(commit_id, delta_records=500)
+    # Step 4: 增量摄入。继续携带同一批次和归属，避免增量写到另一张表。
+    r4 = svc_commit.domain_ingest_delta(
+        commit_id,
+        delta_records=500,
+        batch=r3.get("batch") or handoff,
+        batch_id=r3.get("batch_id") or handoff.get("batch_id"),
+        source_id=source_id,
+        table=r3.get("target_table") or r2.get("target_table"),
+    )
     steps.append({"step": "delta_ingest", "ok": r4["ok"], "details": r4})
 
     return {"chain": "stream-ingest", "ok": True, "steps": steps, "summary": {
         "ingested_rows": r2.get("ingested_rows"),
+        "batch_id": r3.get("batch_id") or r2.get("batch_id"),
+        "target_table": r3.get("target_table") or r2.get("target_table"),
+        "source_id": source_id,
+        "start_offset": r3.get("start_offset") or r2.get("start_offset"),
+        "end_offset": r3.get("end_offset") or r2.get("end_offset"),
         "committed_version": r3.get("version"),
         "delta_records": r4.get("delta_records"),
     }}

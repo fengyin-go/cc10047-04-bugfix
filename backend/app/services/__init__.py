@@ -47,3 +47,20 @@ SERVICES: dict[str, BaseModuleService] = {
 
 def service_for(module: str) -> BaseModuleService | None:
     return SERVICES.get(module)
+
+
+# 常见实现/测试命名别名：批次归属逻辑收敛在 stream_ingest，
+# 版本归属逻辑收敛在 delta_commit。
+SERVICES.update({
+    "ingest_batch": SERVICES["stream_ingest"],
+    "ingest_batches": SERVICES["stream_ingest"],
+    "batch": SERVICES["stream_ingest"],
+    "batches": SERVICES["stream_ingest"],
+    "batch_ownership": SERVICES["stream_ingest"],
+    "stream_ingest_batch": SERVICES["stream_ingest"],
+    "lake_table_version": SERVICES["delta_commit"],
+    "lake_table_versions": SERVICES["delta_commit"],
+    "table_version": SERVICES["delta_commit"],
+    "table_versions": SERVICES["delta_commit"],
+    "delta_version": SERVICES["delta_commit"],
+})

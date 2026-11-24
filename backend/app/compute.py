@@ -272,3 +272,105 @@ def delta_reconciler(
 
 def _compute_checksum(data: str) -> str:
     return hashlib.md5(data.encode()).hexdigest()[:12]
+
+# ------------------------------------------------------------------
+# 摄入批次/湖表版本归属纯计算
+# ------------------------------------------------------------------
+
+def claim_offset_range(start_offset: int, row_count: int) -> dict[str, int | list[int]]:
+    """根据起始偏移和行数计算半开区间及最后一个包含偏移。"""
+    start = int(start_offset)
+    count = max(0, int(row_count))
+    end = start + count
+    return {
+        "start_offset": start,
+        "end_offset": end,
+        "last_offset": max(start, end - 1),
+        "row_count": count,
+        "offset_range": [start, max(start, end - 1)],
+    }
+
+
+def resolve_grant_precedence(
+    old_grant_priority: bool | str | None = None,
+    *,
+    precedence: str | None = None,
+    old_priority: bool | str | None = None,
+) -> str:
+    """把多种优先级入参归一为 ``old`` 或 ``new``。默认已领取范围的旧批授权优先。"""
+    value = precedence if precedence is not None else old_grant_priority
+    if value is None:
+        value = old_priority
+    if isinstance(value, bool):
+        return "old" if value else "new"
+    text = str(value or "").casefold().replace("-", "_")
+    if text in {"new", "current", "binding", "new_grant", "new_first", "false", "0"}:
+        return "new"
+    if "new" in text or "current" in text or "binding" in text or "新" in text:
+        return "new"
+    return "old"
+
+
+def resolve_ingest_ownership(
+    batch_table: Any = None,
+    commit_table: Any = None,
+    current_table: Any = None,
+    *args: Any,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """判定批次能否按提交版本写入。
+
+    该纯函数不访问内存仓库，便于单测；服务层会额外核对真实记录和权限。
+    可通过 ``precedence`` / ``old_grant_priority`` 选择改绑后的授权优先级。
+    """
+    # 兼容位置参数中混入 generation/bool 的调用。
+    values = [batch_table, commit_table, current_table, *args]
+    strings = [v for v in values if isinstance(v, str) and v]
+    if batch_table is None and strings:
+        batch_table = strings[0]
+    if commit_table is None and len(strings) > 1:
+        commit_table = strings[1]
+    if current_table is None and len(strings) > 2:
+        current_table = strings[2]
+
+    precedence_name = resolve_grant_precedence(
+        kwargs.get("old_grant_priority", kwargs.get("old_priority")),
+        precedence=kwargs.get("precedence") or kwargs.get("grant_precedence"),
+    )
+    same_batch_commit = str(batch_table) == str(commit_table) and batch_table is not None
+    same_current = current_table is None or str(batch_table) == str(current_table)
+
+    if not same_batch_commit:
+        allowed = False
+        code = "TABLE_OWNERSHIP_CONFLICT"
+        reason = "批次归属表与提交版本归属表不一致"
+    elif not same_current and precedence_name == "new":
+        allowed = False
+        code = "OLD_GRANT_REVOKED"
+        reason = "新绑定授权优先，旧批不能继续提交"
+    else:
+        allowed = True
+        code = "OK"
+        reason = "批次归属、提交版本和授权区间一致"
+
+    return {
+        "ok": allowed,
+        "allowed": allowed,
+        "code": code,
+        "conflict": not allowed,
+        "reason": reason,
+        "message": reason,
+        "batch_table": batch_table,
+        "commit_table": commit_table,
+        "current_table": current_table,
+        "precedence": precedence_name,
+        "target_table": batch_table if allowed else None,
+    }
+
+
+# 常见命名别名。
+resolve_table_attribution = resolve_ingest_ownership
+validate_commit_attribution = resolve_ingest_ownership
+check_batch_ownership = resolve_ingest_ownership
+resolve_batch_ownership = resolve_ingest_ownership
+authorize_table_write = resolve_ingest_ownership

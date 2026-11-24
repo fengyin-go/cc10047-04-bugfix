@@ -53,13 +53,49 @@ class BaseModuleService:
         rows = store.rows(self.MODULE)
         entry = {"id": max((int(row.get("id", 0)) for row in rows), default=0) + 1}
         entry.update({field: values.get(field) for field in self.LIST_FIELDS})
+        # 保留权限、写入方、幂等键等治理扩展字段；受保护字段仍由服务端决定。
+        for key, value in values.items():
+            if key in {"id", "status", "pending", "abnormal"}:
+                continue
+            if key not in entry or entry.get(key) in (None, ""):
+                entry[key] = value
+        if not str(entry.get("目标湖表") or "").strip() and values.get("target_table") is not None:
+            entry["目标湖表"] = values.get("target_table")
+        if values.get("目标湖表") is not None:
+            entry["target_table"] = values.get("目标湖表")
         entry["status"] = self.STATUS_ORDER[0]
         entry["pending"] = True
         entry["abnormal"] = False
         rows.append(entry)
         return entry, []
 
-    def run_action(self, entry_id: int, action: str) -> tuple[dict[str, Any] | None, str]:
+    def update_entry(self, entry_id: int, values: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
+        entry = store.find(self.MODULE, entry_id)
+        if entry is None:
+            return None, f"{self.ENTITY} {entry_id} 不存在或已归档"
+        for field in self.LIST_FIELDS:
+            if field in values:
+                entry[field] = values.get(field)
+        for key, value in values.items():
+            if key in {"id", "status", "pending", "abnormal"}:
+                continue
+            if key not in entry:
+                entry[key] = value
+        # 中文领域字段是详情页的权威归属；同步英文别名，避免两套归属漂移。
+        if values.get("目标湖表") is not None:
+            entry["target_table"] = values.get("目标湖表")
+            entry["table"] = values.get("目标湖表")
+        elif values.get("target_table") is not None:
+            entry["目标湖表"] = values.get("target_table")
+            entry["table"] = values.get("target_table")
+        return entry, f"{self.ENTITY}已更新"
+
+    def run_action(
+        self,
+        entry_id: int,
+        action: str,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any] | None, str]:
         entry = store.find(self.MODULE, entry_id)
         if entry is None:
             return None, f"{self.ENTITY} {entry_id} 不存在或已归档"

@@ -41,6 +41,7 @@
       <thead>
         <tr>
           <th v-for="column in meta.fields" :key="column">{{ column }}</th>
+          <th v-if="showAttributionColumn">来源 / 偏移 / 批次</th>
           <th>当前状态</th>
           <th>可执行动作</th>
         </tr>
@@ -48,6 +49,24 @@
       <tbody>
         <tr v-for="row in rows" :key="String(row.id)" :data-testid="`row-${row.id}`" :data-status="String(row.status)">
           <td v-for="column in meta.fields" :key="column">{{ row[column] ?? '—' }}</td>
+          <td v-if="showAttributionColumn" class="attribution-cell" data-testid="attribution">
+            <template v-if="meta.key === 'stream_ingest'">
+              <div>表：{{ row.target_table || row['目标湖表'] || '—' }}</div>
+              <div>来源：{{ row.source_id ?? '—' }}</div>
+              <div v-if="row.last_start_offset !== undefined || row.last_end_offset !== undefined">
+                偏移：{{ row.last_start_offset ?? 0 }}–{{ row.last_end_offset ?? '—' }}
+              </div>
+              <div>待办批次：{{ row.pending_batch_count ?? 0 }}</div>
+            </template>
+            <template v-else-if="meta.key === 'delta_commit'">
+              <div>表：{{ row.target_table || row['目标湖表'] || '—' }}</div>
+              <div>来源：{{ row.source_id ?? row.source_ref ?? '—' }}</div>
+              <div v-if="row.start_offset !== undefined || row.end_offset !== undefined">
+                偏移：{{ row.start_offset ?? '—' }}–{{ row.end_offset ?? '—' }}
+              </div>
+              <div v-if="row.batch_id !== undefined">批次：{{ row.batch_id }}</div>
+            </template>
+          </td>
           <td>{{ row.status }}</td>
           <td class="row-actions">
             <button
@@ -63,7 +82,7 @@
           </td>
         </tr>
         <tr v-if="!rows.length">
-          <td :colspan="meta.fields.length + 2" class="empty-state">
+          <td :colspan="meta.fields.length + (showAttributionColumn ? 3 : 2)" class="empty-state">
             暂无{{ meta.name }}数据，可先登记{{ meta.entity }}
           </td>
         </tr>
@@ -112,6 +131,9 @@ const total = ref(0)
 const errorMessage = ref('')
 const filters = ref<Record<string, string>>({})
 const filterFields = meta.fields.slice(0, 3)
+const showAttributionColumn = computed(() =>
+  ['stream_ingest', 'delta_commit'].includes(meta.key),
+)
 const showCreate = ref(false)
 const creating = ref(false)
 const createValues = ref<Record<string, string>>({})
